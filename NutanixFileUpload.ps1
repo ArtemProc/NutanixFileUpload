@@ -12,7 +12,7 @@ Param (
 
 <#
   .SYNOPSIS
-  Uploads a local Windows file to the Nutanix image catalogus
+  Uploads a local Windows file to the Nutanix image catalog.
 
   .DESCRIPTION
   Both Commandline and UI based tool to upload ISO or Disk images to the Nutanix platform.
@@ -56,8 +56,8 @@ Param (
   Starts the tool without Credential Prompt
 
   .EXAMPLE
-  C:\PS> extension -name "File" -extension "doc"
-  File.doc
+  PS D:\GitHub\NutanixFileUpload> .\NutanixFileUpload.ps1 -PCCreds $creds -PCClusterIP 10.10.0.32 -CommandLine $true -EULA $true -ContainerName OS -SourceImagePath D:\Oracle.qcow -TargetImageName "OracleTestImage" -TargetImageDescription "Description" -PECluster mm-
+  Full commandline mode
 
   .EXAMPLE
   C:\PS> extension "File" "doc"
@@ -214,6 +214,59 @@ Function REST-PRX-Get-Task {
   Return $task
 } 
 
+Function REST-Image-Import-PC {
+  Param (
+    [string] $PCClusterIP,
+    [string] $PxClusterPass,
+    [string] $PxClusterUser,
+    [string] $failsilent,
+    [String] $PEclusterUUID
+  )
+  write-log -message "Building Credential object"
+  $credPair = "$($PxClusterUser):$($PxClusterPass)"
+  $encodedCredentials = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes($credPair))
+  $headers = @{ Authorization = "Basic $encodedCredentials" }
+
+  do {;
+
+    write-log -message "Building Image Import JSON" 
+    $ImageURL = "https://$($PCClusterIP):9440/api/nutanix/v3/images/migrate"  
+    $ImageJSON = @"
+{
+  "image_reference_list":[],
+  "cluster_reference":{
+    "uuid":"$($PEclusterUUID)",
+    "kind":"cluster",
+    "name":"string"}
+}
+"@
+    $countimport++;
+    $successImport = $false;
+    try {;
+      $task = Invoke-RestMethod -Uri $ImageURL -method "post" -body $ImageJSON -ContentType 'application/json' -headers $headers -ea:4;
+      $successImport = $true
+    } catch {$error.clear();
+
+      write-log -message "Importing Images into PC Failed, retry attempt '$countimport' out of '$failcount'" -sev "WARN";
+
+      sleep 60
+      $successImport = $false;
+    }
+  } until ($successImport -eq $true -or $countimport -eq $failcount);
+
+  if ($successImport -eq $true){
+    write-log -message "Importing Images into PC success"
+    $status = "Success"
+  } else {
+    $status = "Failed"
+  }
+  $resultobject =@{
+    Result = $status
+    TaskUUID = $task.task_uuid
+  }
+  return $resultobject
+};
+
 Function REST-PRX-Create-Local-Image {
   Param (
     [string] $PxClusterUser,
@@ -270,17 +323,20 @@ Function REST-PRX-Upload-Local-Image {
     'X-Nutanix-Destination-Container' = $containerUUID
   }
 
-  $url = "https://$($PCClusterIP):9440/api/nutanix/v0.8/images/$($imageTask.entity_reference_list.uuid)/upload?proxyClusterUuid=$CLUUID"
+  $url = "https://$($PCClusterIP):9440/api/nutanix/v0.8/images/$($imageuuid)/upload?proxyClusterUuid=$CLUUID"
+
+  write-log -message "Sending image to Container UUID '$containerUUID'"
+  write-log -message "Updating Image UUID '$($imageuuid)'"
 
   try{
-
-    $task = Invoke-RestMethod -Uri $url -Credential $Creds -InFile "$SourceImagePath" -Method PUT -ContentType "application/octet-stream" -headers $headers -ea:4
-
+  
+    $task = invoke-RestMethod -Uri $url -Credential $Creds -InFile "$SourceImagePath" -Method PUT -ContentType "application/octet-stream" -headers $headers -ea:4
+  
   } catch {
     sleep 10
-
+  
     $FName = Get-FunctionName;write-log -message "Error Caught on function $FName" -sev "WARN"
-
+  
     Invoke-RestMethod -Uri $url -Credential $Creds -InFile "$SourceImagePath" -Method PUT -ContentType "application/octet-stream" -headers $headers
   }
 
@@ -400,7 +456,7 @@ if ($CommandLine){
     $Sourceitem = get-item $SourceImagePath -ea:4 
 
   }
-  if (!$PCClusterIP -eq ""){
+  if ($PCClusterIP -eq "Enter Me"){
     $PCClusterIP = [Microsoft.VisualBasic.Interaction]::InputBox("Enter Prism Central IP", "Prism Central IP address", "")
   }
   if ($TargetImageName -eq "Enter Me"){
@@ -518,8 +574,8 @@ $task = REST-PRX-Create-Local-Image `
   -ImageDescription $TargetImageDescription `
   -ImageType $DiskType
 
+sleep 4
 write-log -message "Lets get the image UUID through the task UUID: '$($task.taskuuid)'"
-sleep 3
 
 $imageTask = REST-PRX-Get-Task `
   -PCClusterIP $vars.PCClusterIP `
@@ -534,9 +590,6 @@ $minutes = $Seconds/60
 write-log -message "Uploading Image" -sev "Chapter"
 write-log -message "Sending payload to the image object '$($imageTask.entity_reference_list.uuid)'"
 write-log -message "Estimated transfer of this file is '$($minutes)' Minutes, function is capped to 1MBs"
-if (!$commandline){
-
-}
 
 $Upload = REST-PRX-Upload-Local-Image `
   -PCClusterIP $vars.PCClusterIP `
@@ -548,6 +601,14 @@ $Upload = REST-PRX-Upload-Local-Image `
   -Creds $vars.PCCreds `
   -ContainerUUID $vars.ContainerUUID
 
+write-log -message "Importing Cluster Images into Prism Central." -sev "Chapter"
 
+REST-Image-Import-PC `
+  -PCClusterIP $vars.PCClusterIP `
+  -PxClusterUser $vars.PCCreds.getnetworkcredential().username `
+  -PxClusterPass $vars.PCCreds.getnetworkcredential().password `
+  -PEclusterUUID $vars.CLUUID
 
-
+if (!$error){
+  [Environment]::Exit(1) 
+}
